@@ -4,15 +4,19 @@
 //
 'use strict';
 
-var WebSocketClient = function (jsmpeglive) {
+/**
+ * WebSocketClient
+ * @param jsmpeglive A jsmpeglive instance
+ * @constructor
+ */
+var WebSocketClient = function WebSocketClient(jsmpeglive) {
   if (!jsmpeglive) {
     throw new Error('jsmpeglive has not been passed in to the constructor');
   }
-  this.number = 0;    // Message number
-  this.autoReconnectInterval = 5 * 1000;    // ms
+  this.number = 0; // Message number
+  this.attempts = 1; // reconnection attempts
   this.jsmpeglive = jsmpeglive;
   this.instance = null;
-  this.state = 'stopped';
 };
 
 WebSocketClient.prototype.close = function () {
@@ -33,8 +37,10 @@ WebSocketClient.prototype.connect = function (url) {
   this.instance = new WebSocket(this.url);
 
   this.instance.onopen = function () {
+    self.attempts = 1;
     self.instance.binaryType = 'arraybuffer';
     self.instance.onmessage = function (event) {
+      console.debug('onmessage');
       self.jsmpeglive.receiveData.bind(self.jsmpeglive, event.data)();
       self.number++;
       self.onmessage(event);
@@ -44,10 +50,10 @@ WebSocketClient.prototype.connect = function (url) {
 
   this.instance.onclose = function (err) {
     switch (err.code) {
-      case 1000:  // CLOSE_NORMAL
-        console.log("WebSocket: closed");
+      case 1000: // CLOSE_NORMAL
+        console.debug('WebSocket: closed');
         break;
-      default:    // Abnormal closure
+      default: // Abnormal closure
         self.reconnect.bind(self)(err);
         break;
     }
@@ -75,26 +81,33 @@ WebSocketClient.prototype.send = function (data) {
 };
 
 WebSocketClient.prototype.reconnect = function (e) {
-  console.log(`WebSocketClient: retry in ${this.autoReconnectInterval}ms`, e);
-  var that = this;
+  var self = this;
+  var time = generateInterval(self.attempts);
+
+  function generateInterval(k) {
+    return Math.min(30, (Math.pow(2, k) - 1)) * 1000;
+  }
+
+  console.debug('WebSocketClient: retry in ' + time + 'ms', e);
   setTimeout(function () {
-    console.log("WebSocketClient: reconnecting...");
-    that.connect(that.url);
-  }, this.autoReconnectInterval);
+    self.attempts++;
+    console.debug('WebSocketClient: reconnecting...' + self.attempts);
+    self.connect(self.url);
+  }, time);
 };
 
 WebSocketClient.prototype.onopen = function () {
-  console.log("WebSocketClient: open", arguments);
+  console.debug('WebSocketClient: open', arguments);
 };
 
 WebSocketClient.prototype.onerror = function (e) {
-  console.log("WebSocketClient: error", arguments);
+  console.debug('WebSocketClient: error', e);
 };
 
 WebSocketClient.prototype.onmessage = function (event) {
-  console.log("WebSocketClient: message");
+  console.debug('WebSocketClient: message', event.data.length);
 };
 
-WebSocketClient.prototype.onclose = function (e) {
-  console.log("WebSocketClient: closed", arguments);
+WebSocketClient.prototype.onclose = function (err) {
+  console.debug('WebSocketClient: closed', err.code);
 };

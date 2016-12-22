@@ -34,6 +34,9 @@ or
 ./start_ffmpeg_stream.sh "rtsp://192.168.1.54:554/axis-media/media.amp?videocodec=h264&resolution=640x480"
 ```
 
+## Building
+To build, just run `npm build`
+
 ## API ##
 
 ### Constructor ###
