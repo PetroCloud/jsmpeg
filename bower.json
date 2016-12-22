@@ -1,0 +1,26 @@
+{
+  "name": "jsmpeglive",
+  "description": "#### An MPEG1 Live Stream Video Decoder in JavaScript ####",
+  "main": "jsmpeglive.js",
+  "authors": [
+    "Luis Lobo Borobia"
+  ],
+  "license": "MIT",
+  "keywords": [
+    "mpeg",
+    "live",
+    "streaming",
+    "stream",
+    "mpeg1",
+    "websocket",
+    "websockets"
+  ],
+  "homepage": "https://github.com/PetroCloud/jsmpeglive",
+  "ignore": [
+    "**/.*",
+    "node_modules",
+    "bower_components",
+    "test",
+    "tests"
+  ]
+}
