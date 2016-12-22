@@ -1,6 +1,6 @@
 {
   "name": "jsmpeglive",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "#### An MPEG1 Live Stream Video Decoder in JavaScript ####",
   "main": "jsmpeglive.js",
   "dependencies": {
