@@ -1,0 +1,24 @@
+{
+  "name": "jsmpeglive",
+  "version": "1.0.0",
+  "description": "#### An MPEG1 Live Stream Video Decoder in JavaScript ####",
+  "main": "stream-server.js",
+  "dependencies": {
+    "ws": "^1.1.1"
+  },
+  "devDependencies": {},
+  "scripts": {
+    "start": "node stream-server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:PetroCloud/jsmpeglive.git"
+  },
+  "author": "Luis Lobo Borobia",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/PetroCloud/jsmpeglive"
+  },
+  "homepage": "https://github.com/PetroCloud/jsmpeglive#readme"
+}

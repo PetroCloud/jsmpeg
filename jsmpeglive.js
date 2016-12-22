@@ -1,4 +1,8 @@
 /**
+ *
+ */
+
+/**
  * JSMPEG 2 - An attempt to decouple JSMPEG from the communication layer
  * by Luis Lobo Borobia
  *
@@ -9,6 +13,10 @@
 (function (window) {
   'use strict';
 
+  function isWebSocket(url) {
+    return new RegExp("^(ws|wss)://", "i").test(url);
+  }
+
   var requestAnimFrame = (function () {
     return window.requestAnimationFrame ||
       window.webkitRequestAnimationFrame ||
@@ -18,24 +26,10 @@
       };
   })();
 
-  var jsmpeg = window.jsmpeg = function (url, opts) {
+  var jsmpeglive = window.jsmpeglive = function (url, opts) {
     opts = opts || {};
-    this.progressive = (opts.progressive !== false);
-    this.benchmark = !!opts.benchmark;
     this.canvas = opts.canvas || document.createElement('canvas');
-    this.autoplay = !!opts.autoplay;
-    this.wantsToPlay = this.autoplay;
-    this.loop = !!opts.loop;
-    this.seekable = !!opts.seekable;
-    this.externalLoadCallback = opts.onload || null;
     this.externalDecodeCallback = opts.ondecodeframe || null;
-    this.externalFinishedCallback = opts.onfinished || null;
-
-    this.customIntraQuantMatrix = new Uint8Array(64);
-    this.customNonIntraQuantMatrix = new Uint8Array(64);
-    this.blockData = new Int32Array(64);
-    this.zeroBlockData = new Int32Array(64);
-    this.fillArray(this.zeroBlockData, 0);
 
     // use WebGL for YCbCrToRGBA conversion if possible (much faster)
     if (!opts.forceCanvas2D && this.initWebGL()) {
@@ -44,26 +38,57 @@
       this.canvasContext = this.canvas.getContext('2d');
       this.renderFrame = this.renderFrame2D;
     }
-    this.engine = null;
 
-    if (url instanceof WebSocket) {
-      this.engine = new WebSocketSupport(url, this);
-      this.engine.connectWebSocket();
-    }
-    else {
-      this.load(url);
+    // Configure Transport engine
+    this.transportEngine = null;
+
+    if (isWebSocket(url)) {
+      if (!WebSocketClient) {
+        throw new Error('You should include WebSocketSupport to the page');
+      }
+
+      this.blockData = new Int32Array(64);
+      this.zeroBlockData = new Int32Array(64);
+      this.fillArray(this.zeroBlockData, 0);
+
+      this.transportEngine = new WebSocketClient(this);
+      this.transportEngine.onopen = this.init.bind(this);
+      this.transportEngine.connect(url);
+    } else {
+      throw new Error('Invalid url. It should be a recognized Transport uri: ws, wss');
     }
   };
 
+  jsmpeglive.prototype.init = function () {
+
+
+    this.buffer = new BitReader(new ArrayBuffer(this.socketBufferSize));
+
+    this.nextPictureBuffer = new BitReader(new ArrayBuffer(this.socketBufferSize));
+    this.nextPictureBuffer.writePos = 0;
+    this.nextPictureBuffer.chunkBegin = 0;
+    this.nextPictureBuffer.lastWriteBeforeWrap = 0;
+
+  };
+
+  jsmpeglive.prototype.stop = function () {
+    if (this.transportEngine) {
+      this.transportEngine.close();
+    }
+    if (this.canvasContext) {
+      this.canvasContext.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    }
+  };
 
   // ----------------------------------------------------------------------------
   // Streaming over WebSockets
 
-  jsmpeg.prototype.waitForIntraFrame = true;
-  jsmpeg.prototype.socketBufferSize = 512 * 1024; // 512kb each
+  jsmpeglive.prototype.waitForIntraFrame = true;
+
+  jsmpeglive.prototype.socketBufferSize = 512 * 1024; // 512kb each
 
 
-  jsmpeg.prototype.decodeHeader = function (data) {
+  jsmpeglive.prototype.decodeHeader = function (data) {
     // Custom header sent to all newly connected clients when streaming
     // over websockets:
     // struct { char magic[4] = 'jsmp'; unsigned short width, height; };
@@ -79,7 +104,7 @@
     }
   };
 
-  jsmpeg.prototype.receiveData = function (data) {
+  jsmpeglive.prototype.receiveData = function (data) {
     var messageData = new Uint8Array(data);
 
     if (!this.sequenceStarted) {
@@ -160,359 +185,16 @@
     requestAnimFrame(this.scheduleDecoding.bind(this), this.canvas);
   };
 
-  jsmpeg.prototype.scheduleDecoding = function () {
+  jsmpeglive.prototype.scheduleDecoding = function () {
     this.decodePicture();
     this.currentPictureDecoded = true;
   };
 
 
   // ----------------------------------------------------------------------------
-  // Recording from WebSockets
-
-  jsmpeg.prototype.isRecording = false;
-  jsmpeg.prototype.recorderWaitForIntraFrame = false;
-  jsmpeg.prototype.recordedFrames = 0;
-  jsmpeg.prototype.recordedSize = 0;
-  jsmpeg.prototype.didStartRecordingCallback = null;
-
-  jsmpeg.prototype.recordBuffers = [];
-
-  jsmpeg.prototype.canRecord = function () {
-    return (this.client && this.client.readyState === this.client.OPEN);
-  };
-
-  jsmpeg.prototype.startRecording = function (callback) {
-    if (!this.canRecord()) {
-      return;
-    }
-
-    // Discard old buffers and set for recording
-    this.discardRecordBuffers();
-    this.isRecording = true;
-    this.recorderWaitForIntraFrame = true;
-    this.didStartRecordingCallback = callback || null;
-
-    this.recordedFrames = 0;
-    this.recordedSize = 0;
-
-    // Fudge a simple Sequence Header for the MPEG file
-
-    // 3 bytes width & height, 12 bits each
-    var wh1 = (this.width >> 4),
-      wh2 = ((this.width & 0xf) << 4) | (this.height >> 8),
-      wh3 = (this.height & 0xff);
-
-    this.recordBuffers.push(new Uint8Array([
-      0x00, 0x00, 0x01, 0xb3, // Sequence Start Code
-      wh1, wh2, wh3, // Width & height
-      0x13, // aspect ratio & framerate
-      0xff, 0xff, 0xe1, 0x58, // Meh. Bitrate and other boring stuff
-      0x00, 0x00, 0x01, 0xb8, 0x00, 0x08, 0x00, // GOP
-      0x00, 0x00, 0x00, 0x01, 0x00 // First Picture Start Code
-    ]));
-  };
-
-  jsmpeg.prototype.recordFrameFromCurrentBuffer = function () {
-    if (!this.isRecording) {
-      return;
-    }
-
-    if (this.recorderWaitForIntraFrame) {
-      // Not an intra frame? Exit.
-      if (this.pictureCodingType !== PICTURE_TYPE_I) {
-        return;
-      }
-
-      // Start recording!
-      this.recorderWaitForIntraFrame = false;
-      if (this.didStartRecordingCallback) {
-        this.didStartRecordingCallback(this);
-      }
-    }
-
-    this.recordedFrames++;
-    this.recordedSize += this.buffer.writePos;
-
-    // Copy the actual subrange for the current picture into a new Buffer
-    this.recordBuffers.push(new Uint8Array(this.buffer.bytes.subarray(0, this.buffer.writePos)));
-  };
-
-  jsmpeg.prototype.discardRecordBuffers = function () {
-    this.recordBuffers = [];
-    this.recordedFrames = 0;
-  };
-
-  jsmpeg.prototype.stopRecording = function () {
-    var blob = new Blob(this.recordBuffers, {type: 'video/mpeg'});
-    this.discardRecordBuffers();
-    this.isRecording = false;
-    return blob;
-  };
-
-
-  // ----------------------------------------------------------------------------
-  // Loading via Ajax
-
-  jsmpeg.prototype.intraFrames = [];
-  jsmpeg.prototype.currentFrame = -1;
-  jsmpeg.prototype.currentTime = 0;
-  jsmpeg.prototype.frameCount = 0;
-  jsmpeg.prototype.duration = 0;
-  jsmpeg.prototype.progressiveMinSize = 128 * 1024;
-
-
-  jsmpeg.prototype.fetchReaderPump = function (reader) {
-    var that = this;
-    reader.read().then(function (result) {
-      that.fetchReaderReceive(reader, result);
-    });
-  };
-
-  jsmpeg.prototype.fetchReaderReceive = function (reader, result) {
-    if (result.done) {
-      if (this.seekable) {
-        var currentBufferPos = this.buffer.index;
-        this.collectIntraFrames();
-        this.buffer.index = currentBufferPos;
-      }
-
-      this.duration = this.frameCount / this.pictureRate;
-      this.lastFrameIndex = this.buffer.writePos << 3;
-      return;
-    }
-
-    this.buffer.bytes.set(result.value, this.buffer.writePos);
-    this.buffer.writePos += result.value.byteLength;
-
-    // Find the last picture start code - we have to be careful not trying
-    // to decode any frames that aren't fully loaded yet.
-    this.lastFrameIndex = this.findLastPictureStartCode();
-
-    // Initialize the sequence headers and start playback if we have enough data
-    // (at least 128kb)
-    if (!this.sequenceStarted && this.buffer.writePos >= this.progressiveMinSize) {
-      this.findStartCode(START_SEQUENCE);
-      this.firstSequenceHeader = this.buffer.index;
-      this.decodeSequenceHeader();
-
-      // Load the first frame
-      this.nextFrame();
-
-      if (this.autoplay) {
-        this.play();
-      }
-
-      if (this.externalLoadCallback) {
-        this.externalLoadCallback(this);
-      }
-    }
-
-    // If the player starved previously, restart playback now
-    else if (this.sequenceStarted && this.wantsToPlay && !this.playing) {
-      this.play();
-    }
-
-    // Not enough data to start playback yet - show loading progress
-    else if (!this.sequenceStarted) {
-      var status = {
-        loaded: this.buffer.writePos,
-        total: this.progressiveMinSize
-      };
-      if (this.gl) {
-        this.updateLoaderGL(status);
-      }
-      else {
-        this.updateLoader2D(status);
-      }
-    }
-
-    this.fetchReaderPump(reader);
-  };
-
-  jsmpeg.prototype.findLastPictureStartCode = function () {
-    var bufferBytes = this.buffer.bytes;
-    for (var i = this.buffer.writePos; i > 3; i--) {
-      if (
-        bufferBytes[i] == START_PICTURE &&
-        bufferBytes[i - 1] == 0x01 &&
-        bufferBytes[i - 2] == 0x00 &&
-        bufferBytes[i - 3] == 0x00
-      ) {
-        return (i - 3) << 3;
-      }
-    }
-    return 0;
-  };
-
-  jsmpeg.prototype.load = function (url) {
-    this.url = url;
-
-    var self = this;
-    if (
-      this.progressive &&
-      window.fetch &&
-      window.ReadableByteStream
-    ) {
-      var reqHeaders = new Headers();
-      reqHeaders.append('Content-Type', 'video/mpeg');
-      fetch(url, {headers: reqHeaders})
-        .then(function (res) {
-          var contentLength = res.headers.get('Content-Length');
-          var reader = res.body.getReader();
-
-          self.buffer = new BitReader(new ArrayBuffer(contentLength));
-          self.buffer.writePos = 0;
-          self.fetchReaderPump(reader);
-        });
-    }
-    else {
-      var request = new XMLHttpRequest();
-      request.onreadystatechange = function () {
-        if (request.readyState === request.DONE && request.status === 200) {
-          self.loadCallback(request.response);
-        }
-      };
-
-      request.onprogress = this.gl
-        ? this.updateLoaderGL.bind(this)
-        : this.updateLoader2D.bind(this);
-
-      request.open('GET', url);
-      request.responseType = 'arraybuffer';
-      request.send();
-    }
-  };
-
-  jsmpeg.prototype.updateLoader2D = function (ev) {
-    var
-      p = ev.loaded / ev.total,
-      w = this.canvas.width,
-      h = this.canvas.height,
-      ctx = this.canvasContext;
-
-    ctx.fillStyle = '#222';
-    ctx.fillRect(0, 0, w, h);
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(0, h - h * p, w, h * p);
-  };
-
-  jsmpeg.prototype.updateLoaderGL = function (ev) {
-    var gl = this.gl;
-    gl.uniform1f(gl.getUniformLocation(this.loadingProgram, 'loaded'), (ev.loaded / ev.total));
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-  };
-
-
-  jsmpeg.prototype.loadCallback = function (file) {
-    this.buffer = new BitReader(file);
-
-    if (this.seekable) {
-      this.collectIntraFrames();
-      this.buffer.index = 0;
-    }
-
-    this.findStartCode(START_SEQUENCE);
-    this.firstSequenceHeader = this.buffer.index;
-    this.decodeSequenceHeader();
-
-    // Calculate the duration. This only works if the video is seekable and we have a frame count
-    this.duration = this.frameCount / this.pictureRate;
-
-    // Load the first frame
-    this.nextFrame();
-
-    if (this.autoplay) {
-      this.play();
-    }
-
-    if (this.externalLoadCallback) {
-      this.externalLoadCallback(this);
-    }
-  };
-
-  jsmpeg.prototype.collectIntraFrames = function () {
-    // Loop through the whole buffer and collect all intraFrames to build our seek index.
-    // We also keep track of total frame count here
-    var frame;
-    for (frame = 0; this.findStartCode(START_PICTURE) !== BitReader.NOT_FOUND; frame++) {
-
-      // Check if the found picture is an intra frame and remember the position
-      this.buffer.advance(10); // skip temporalReference
-      if (this.buffer.getBits(3) === PICTURE_TYPE_I) {
-        // Remember index 13 bits back, before temporalReference and picture type
-        this.intraFrames.push({frame: frame, index: this.buffer.index - 13});
-      }
-    }
-
-    this.frameCount = frame;
-  };
-
-  jsmpeg.prototype.seekToFrame = function (seekFrame, seekExact) {
-    if (seekFrame < 0 || seekFrame >= this.frameCount || !this.intraFrames.length) {
-      return false;
-    }
-
-    // Find the last intra frame before or equal to seek frame
-    var target = null;
-    for (var i = 0; i < this.intraFrames.length && this.intraFrames[i].frame <= seekFrame; i++) {
-      target = this.intraFrames[i];
-    }
-
-    this.buffer.index = target.index;
-    this.currentFrame = target.frame - 1;
-
-    // If we're seeking to the exact frame, we may have to decode some more frames before
-    // the one we want
-    if (seekExact) {
-      for (var frame = target.frame; frame < seekFrame; frame++) {
-        this.decodePicture(DECODE_SKIP_OUTPUT);
-        this.findStartCode(START_PICTURE);
-      }
-      this.currentFrame = seekFrame - 1;
-    }
-
-    // Decode and display the picture we have seeked to
-    this.decodePicture();
-    return true;
-  };
-
-  jsmpeg.prototype.seekToTime = function (time, seekExact) {
-    this.seekToFrame((time * this.pictureRate) | 0, seekExact);
-  };
-
-  jsmpeg.prototype.play = function () {
-    if (this.playing) {
-      return;
-    }
-    this.targetTime = this.now();
-    this.playing = true;
-    this.wantsToPlay = true;
-    this.scheduleNextFrame();
-  };
-
-  jsmpeg.prototype.pause = function () {
-    this.playing = false;
-    this.wantsToPlay = false;
-  };
-
-  jsmpeg.prototype.stop = function () {
-    this.currentFrame = -1;
-    if (this.buffer) {
-      this.buffer.index = this.firstSequenceHeader;
-    }
-    this.playing = false;
-    if (this.client) {
-      this.client.close();
-      this.client = null;
-    }
-    this.wantsToPlay = false;
-  };
-
-
-  // ----------------------------------------------------------------------------
   // Utilities
 
-  jsmpeg.prototype.readCode = function (codeTable) {
+  jsmpeglive.prototype.readCode = function (codeTable) {
     var state = 0;
     do {
       state = codeTable[state + this.buffer.getBits(1)];
@@ -520,18 +202,7 @@
     return codeTable[state + 2];
   };
 
-  jsmpeg.prototype.findStartCode = function (code) {
-    var current = 0;
-    while (true) {
-      current = this.buffer.findNextMPEGStartCode();
-      if (current === code || current === BitReader.NOT_FOUND) {
-        return current;
-      }
-    }
-    return BitReader.NOT_FOUND;
-  };
-
-  jsmpeg.prototype.fillArray = function (a, value) {
+  jsmpeglive.prototype.fillArray = function (a, value) {
     for (var i = 0, length = a.length; i < length; i++) {
       a[i] = value;
     }
@@ -541,122 +212,9 @@
   // ----------------------------------------------------------------------------
   // Sequence Layer
 
-  jsmpeg.prototype.pictureRate = 30;
-  jsmpeg.prototype.lateTime = 0;
-  jsmpeg.prototype.firstSequenceHeader = 0;
-  jsmpeg.prototype.targetTime = 0;
+  jsmpeglive.prototype.pictureRate = 30;
 
-  jsmpeg.prototype.benchmark = false;
-  jsmpeg.prototype.benchFrame = 0;
-  jsmpeg.prototype.benchDecodeTimes = 0;
-  jsmpeg.prototype.benchAvgFrameTime = 0;
-
-  jsmpeg.prototype.now = function () {
-    return window.performance
-      ? window.performance.now()
-      : Date.now();
-  };
-
-  jsmpeg.prototype.nextFrame = function () {
-    if (!this.buffer) {
-      return;
-    }
-
-    var frameStart = this.now();
-    while (true) {
-      var code = this.buffer.findNextMPEGStartCode();
-
-      if (code === START_SEQUENCE) {
-        this.decodeSequenceHeader();
-      }
-      else if (code === START_PICTURE) {
-        if (this.progressive && this.buffer.index >= this.lastFrameIndex) {
-          // Starved
-          this.playing = false;
-          return;
-        }
-        if (this.playing) {
-          this.scheduleNextFrame();
-        }
-        this.decodePicture();
-        this.benchDecodeTimes += this.now() - frameStart;
-        return this.canvas;
-      }
-      else if (code === BitReader.NOT_FOUND) {
-        this.stop(); // Jump back to the beginning
-
-        if (this.externalFinishedCallback) {
-          this.externalFinishedCallback(this);
-        }
-
-        // Only loop if we found a sequence header
-        if (this.loop && this.sequenceStarted) {
-          this.play();
-        }
-        return null;
-      }
-      else {
-        // ignore (GROUP, USER_DATA, EXTENSION, SLICES...)
-      }
-    }
-  };
-
-  jsmpeg.prototype.scheduleNextFrame = function () {
-    this.lateTime = this.now() - this.targetTime;
-    var wait = Math.max(0, (1000 / this.pictureRate) - this.lateTime);
-    this.targetTime = this.now() + wait;
-
-    if (this.benchmark) {
-      this.benchFrame++;
-      if (this.benchFrame >= 120) {
-        this.benchAvgFrameTime = this.benchDecodeTimes / this.benchFrame;
-        this.benchFrame = 0;
-        this.benchDecodeTimes = 0;
-        if (window.console) {
-          console.log('Average time per frame:', this.benchAvgFrameTime, 'ms');
-        }
-      }
-      setTimeout(this.nextFrame.bind(this), 0);
-    }
-    else if (wait < 18) {
-      this.scheduleAnimation();
-    }
-    else {
-      setTimeout(this.scheduleAnimation.bind(this), wait);
-    }
-  };
-
-  jsmpeg.prototype.scheduleAnimation = function () {
-    requestAnimFrame(this.nextFrame.bind(this), this.canvas);
-  };
-
-  jsmpeg.prototype.decodeSequenceHeader = function () {
-    this.width = this.buffer.getBits(12);
-    this.height = this.buffer.getBits(12);
-    this.buffer.advance(4); // skip pixel aspect ratio
-    this.pictureRate = PICTURE_RATE[this.buffer.getBits(4)];
-    this.buffer.advance(18 + 1 + 10 + 1); // skip bitRate, marker, bufferSize and constrained bit
-
-    this.initBuffers();
-
-    var i;
-
-    if (this.buffer.getBits(1)) { // load custom intra quant matrix?
-      for (i = 0; i < 64; i++) {
-        this.customIntraQuantMatrix[ZIG_ZAG[i]] = this.buffer.getBits(8);
-      }
-      this.intraQuantMatrix = this.customIntraQuantMatrix;
-    }
-
-    if (this.buffer.getBits(1)) { // load custom non intra quant matrix?
-      for (i = 0; i < 64; i++) {
-        this.customNonIntraQuantMatrix[ZIG_ZAG[i]] = this.buffer.getBits(8);
-      }
-      this.nonIntraQuantMatrix = this.customNonIntraQuantMatrix;
-    }
-  };
-
-  jsmpeg.prototype.initBuffers = function () {
+  jsmpeglive.prototype.initBuffers = function () {
     this.intraQuantMatrix = DEFAULT_INTRA_QUANT_MATRIX;
     this.nonIntraQuantMatrix = DEFAULT_NON_INTRA_QUANT_MATRIX;
 
@@ -724,26 +282,29 @@
   // ----------------------------------------------------------------------------
   // Picture Layer
 
-  jsmpeg.prototype.currentY = null;
-  jsmpeg.prototype.currentCr = null;
-  jsmpeg.prototype.currentCb = null;
+  jsmpeglive.prototype.currentY = null;
+  jsmpeglive.prototype.currentCr = null;
+  jsmpeglive.prototype.currentCb = null;
 
-  jsmpeg.prototype.currentRGBA = null;
+  jsmpeglive.prototype.currentRGBA = null;
 
-  jsmpeg.prototype.pictureCodingType = 0;
+  jsmpeglive.prototype.pictureCodingType = 0;
 
   // Buffers for motion compensation
-  jsmpeg.prototype.forwardY = null;
-  jsmpeg.prototype.forwardCr = null;
-  jsmpeg.prototype.forwardCb = null;
+  jsmpeglive.prototype.forwardY = null;
+  jsmpeglive.prototype.forwardCr = null;
+  jsmpeglive.prototype.forwardCb = null;
 
-  jsmpeg.prototype.fullPelForward = false;
-  jsmpeg.prototype.forwardFCode = 0;
-  jsmpeg.prototype.forwardRSize = 0;
-  jsmpeg.prototype.forwardF = 0;
+  jsmpeglive.prototype.fullPelForward = false;
+  jsmpeglive.prototype.forwardFCode = 0;
+  jsmpeglive.prototype.forwardRSize = 0;
+  jsmpeglive.prototype.forwardF = 0;
+
+  jsmpeglive.prototype.currentFrame = -1;
+  jsmpeglive.prototype.currentTime = 0;
 
 
-  jsmpeg.prototype.decodePicture = function (skipOutput) {
+  jsmpeglive.prototype.decodePicture = function (skipOutput) {
     this.currentFrame++;
     this.currentTime = this.currentFrame / this.pictureRate;
 
@@ -782,9 +343,6 @@
     // We found the next start code; rewind 32bits and let the main loop handle it.
     this.buffer.rewind(32);
 
-    // Record this frame, if the recorder wants it
-    this.recordFrameFromCurrentBuffer();
-
 
     if (skipOutput !== DECODE_SKIP_OUTPUT) {
       this.renderFrame();
@@ -794,7 +352,7 @@
       }
     }
 
-    // If this is a reference picutre then rotate the prediction pointers
+    // If this is a reference picture then rotate the prediction pointers
     if (this.pictureCodingType === PICTURE_TYPE_I || this.pictureCodingType === PICTURE_TYPE_P) {
       var
         tmpY = this.forwardY,
@@ -820,7 +378,7 @@
     }
   };
 
-  jsmpeg.prototype.YCbCrToRGBA = function () {
+  jsmpeglive.prototype.YCbCrToRGBA = function () {
     var pY = this.currentY;
     var pCb = this.currentCb;
     var pCr = this.currentCr;
@@ -889,7 +447,7 @@
     }
   };
 
-  jsmpeg.prototype.renderFrame2D = function () {
+  jsmpeglive.prototype.renderFrame2D = function () {
     this.YCbCrToRGBA();
     this.canvasContext.putImageData(this.currentRGBA, 0, 0);
   };
@@ -898,13 +456,13 @@
   // ----------------------------------------------------------------------------
   // Accelerated WebGL YCbCrToRGBA conversion
 
-  jsmpeg.prototype.gl = null;
-  jsmpeg.prototype.program = null;
-  jsmpeg.prototype.YTexture = null;
-  jsmpeg.prototype.CBTexture = null;
-  jsmpeg.prototype.CRTexture = null;
+  jsmpeglive.prototype.gl = null;
+  jsmpeglive.prototype.program = null;
+  jsmpeglive.prototype.YTexture = null;
+  jsmpeglive.prototype.CBTexture = null;
+  jsmpeglive.prototype.CRTexture = null;
 
-  jsmpeg.prototype.createTexture = function (index, name) {
+  jsmpeglive.prototype.createTexture = function (index, name) {
     var gl = this.gl;
     var texture = gl.createTexture();
 
@@ -918,7 +476,7 @@
     return texture;
   };
 
-  jsmpeg.prototype.compileShader = function (type, source) {
+  jsmpeglive.prototype.compileShader = function (type, source) {
     var gl = this.gl;
     var shader = gl.createShader(type);
     gl.shaderSource(shader, source);
@@ -931,7 +489,7 @@
     return shader;
   };
 
-  jsmpeg.prototype.initWebGL = function () {
+  jsmpeglive.prototype.initWebGL = function () {
     var gl;
 
     // attempt to get a webgl context
@@ -987,7 +545,7 @@
     return true;
   };
 
-  jsmpeg.prototype.renderFrameGL = function () {
+  jsmpeglive.prototype.renderFrameGL = function () {
     var gl = this.gl;
 
     // WebGL doesn't like Uint8ClampedArrays, so we have to create a Uint8Array view for
@@ -1016,10 +574,10 @@
   // ----------------------------------------------------------------------------
   // Slice Layer
 
-  jsmpeg.prototype.quantizerScale = 0;
-  jsmpeg.prototype.sliceBegin = false;
+  jsmpeglive.prototype.quantizerScale = 0;
+  jsmpeglive.prototype.sliceBegin = false;
 
-  jsmpeg.prototype.decodeSlice = function (slice) {
+  jsmpeglive.prototype.decodeSlice = function (slice) {
     this.sliceBegin = true;
     this.macroblockAddress = (slice - 1) * this.mbWidth - 1;
 
@@ -1047,20 +605,20 @@
   // ----------------------------------------------------------------------------
   // Macroblock Layer
 
-  jsmpeg.prototype.macroblockAddress = 0;
-  jsmpeg.prototype.mbRow = 0;
-  jsmpeg.prototype.mbCol = 0;
+  jsmpeglive.prototype.macroblockAddress = 0;
+  jsmpeglive.prototype.mbRow = 0;
+  jsmpeglive.prototype.mbCol = 0;
 
-  jsmpeg.prototype.macroblockType = 0;
-  jsmpeg.prototype.macroblockIntra = false;
-  jsmpeg.prototype.macroblockMotFw = false;
+  jsmpeglive.prototype.macroblockType = 0;
+  jsmpeglive.prototype.macroblockIntra = false;
+  jsmpeglive.prototype.macroblockMotFw = false;
 
-  jsmpeg.prototype.motionFwH = 0;
-  jsmpeg.prototype.motionFwV = 0;
-  jsmpeg.prototype.motionFwHPrev = 0;
-  jsmpeg.prototype.motionFwVPrev = 0;
+  jsmpeglive.prototype.motionFwH = 0;
+  jsmpeglive.prototype.motionFwV = 0;
+  jsmpeglive.prototype.motionFwHPrev = 0;
+  jsmpeglive.prototype.motionFwVPrev = 0;
 
-  jsmpeg.prototype.decodeMacroblock = function () {
+  jsmpeglive.prototype.decodeMacroblock = function () {
     // Decode macroblock_address_increment
     var
       increment = 0,
@@ -1154,7 +712,7 @@
   };
 
 
-  jsmpeg.prototype.decodeMotionVectors = function () {
+  jsmpeglive.prototype.decodeMotionVectors = function () {
     var code, d, r = 0;
 
     // Forward
@@ -1218,7 +776,7 @@
     }
   };
 
-  jsmpeg.prototype.copyMacroblock = function (motionH, motionV, sY, sCr, sCb) {
+  jsmpeglive.prototype.copyMacroblock = function (motionH, motionV, sY, sCr, sCb) {
     var
       width, scan,
       H, V, oddH, oddV,
@@ -1486,12 +1044,12 @@
   // ----------------------------------------------------------------------------
   // Block layer
 
-  //jsmpeg.prototype.dcPredictorY;
-  //jsmpeg.prototype.dcPredictorCr;
-  //jsmpeg.prototype.dcPredictorCb;
+  //jsmpeglive.prototype.dcPredictorY;
+  //jsmpeglive.prototype.dcPredictorCr;
+  //jsmpeglive.prototype.dcPredictorCb;
 
-  jsmpeg.prototype.blockData = null;
-  jsmpeg.prototype.decodeBlock = function (block) {
+  jsmpeglive.prototype.blockData = null;
+  jsmpeglive.prototype.decodeBlock = function (block) {
 
     var
       n = 0,
@@ -1655,9 +1213,9 @@
     n = 0;
   };
 
-  jsmpeg.prototype.copyBlockToDestination = function (blockData, destArray, destIndex, scan) {
+  jsmpeglive.prototype.copyBlockToDestination = function (blockData, destArray, destIndex, scan) {
     for (var n = 0; n < 64; n += 8, destIndex += scan + 8) {
-      destArray[destIndex + 0] = blockData[n + 0];
+      destArray[destIndex + 0] = blockData[n];
       destArray[destIndex + 1] = blockData[n + 1];
       destArray[destIndex + 2] = blockData[n + 2];
       destArray[destIndex + 3] = blockData[n + 3];
@@ -1668,9 +1226,9 @@
     }
   };
 
-  jsmpeg.prototype.addBlockToDestination = function (blockData, destArray, destIndex, scan) {
+  jsmpeglive.prototype.addBlockToDestination = function (blockData, destArray, destIndex, scan) {
     for (var n = 0; n < 64; n += 8, destIndex += scan + 8) {
-      destArray[destIndex + 0] += blockData[n + 0];
+      destArray[destIndex + 0] += blockData[n];
       destArray[destIndex + 1] += blockData[n + 1];
       destArray[destIndex + 2] += blockData[n + 2];
       destArray[destIndex + 3] += blockData[n + 3];
@@ -1681,7 +1239,7 @@
     }
   };
 
-  jsmpeg.prototype.copyValueToDestination = function (value, destArray, destIndex, scan) {
+  jsmpeglive.prototype.copyValueToDestination = function (value, destArray, destIndex, scan) {
     for (var n = 0; n < 64; n += 8, destIndex += scan + 8) {
       destArray[destIndex + 0] = value;
       destArray[destIndex + 1] = value;
@@ -1694,7 +1252,7 @@
     }
   };
 
-  jsmpeg.prototype.addValueToDestination = function (value, destArray, destIndex, scan) {
+  jsmpeglive.prototype.addValueToDestination = function (value, destArray, destIndex, scan) {
     for (var n = 0; n < 64; n += 8, destIndex += scan + 8) {
       destArray[destIndex + 0] += value;
       destArray[destIndex + 1] += value;
@@ -1708,7 +1266,7 @@
   };
 
   // Clamping version for shitty browsers (IE) that don't support Uint8ClampedArray
-  jsmpeg.prototype.copyBlockToDestinationClamp = function (blockData, destArray, destIndex, scan) {
+  jsmpeglive.prototype.copyBlockToDestinationClamp = function (blockData, destArray, destIndex, scan) {
     var n = 0;
     for (var i = 0; i < 8; i++) {
       for (var j = 0; j < 8; j++) {
@@ -1719,7 +1277,7 @@
     }
   };
 
-  jsmpeg.prototype.addBlockToDestinationClamp = function (blockData, destArray, destIndex, scan) {
+  jsmpeglive.prototype.addBlockToDestinationClamp = function (blockData, destArray, destIndex, scan) {
     var n = 0;
     for (var i = 0; i < 8; i++) {
       for (var j = 0; j < 8; j++) {
@@ -1730,7 +1288,7 @@
     }
   };
 
-  jsmpeg.prototype.IDCT = function () {
+  jsmpeglive.prototype.IDCT = function () {
     // See http://vsr.informatik.tu-chemnitz.de/~jan/MPEG/HTML/IDCT.html
     // for more info.
 
@@ -1745,11 +1303,11 @@
       b1 = blockData[4 * 8 + i];
       b3 = blockData[2 * 8 + i] + blockData[6 * 8 + i];
       b4 = blockData[5 * 8 + i] - blockData[3 * 8 + i];
-      tmp1 = blockData[1 * 8 + i] + blockData[7 * 8 + i];
+      tmp1 = blockData[8 + i] + blockData[7 * 8 + i];
       tmp2 = blockData[3 * 8 + i] + blockData[5 * 8 + i];
-      b6 = blockData[1 * 8 + i] - blockData[7 * 8 + i];
+      b6 = blockData[8 + i] - blockData[7 * 8 + i];
       b7 = tmp1 + tmp2;
-      m0 = blockData[0 * 8 + i];
+      m0 = blockData[i];
       x4 = ((b6 * 473 - b4 * 196 + 128) >> 8) - b7;
       x0 = x4 - (((tmp1 - tmp2) * 362 + 128) >> 8);
       x1 = m0 - b1;
@@ -1760,8 +1318,8 @@
       y5 = x1 - x2;
       y6 = x3 - b3;
       y7 = -x0 - ((b4 * 473 + b6 * 196 + 128) >> 8);
-      blockData[0 * 8 + i] = b7 + y4;
-      blockData[1 * 8 + i] = x4 + y3;
+      blockData[i] = b7 + y4;
+      blockData[8 + i] = x4 + y3;
       blockData[2 * 8 + i] = y5 - x0;
       blockData[3 * 8 + i] = y6 - y7;
       blockData[4 * 8 + i] = y6 + y7;
@@ -1779,7 +1337,7 @@
       tmp2 = blockData[3 + i] + blockData[5 + i];
       b6 = blockData[1 + i] - blockData[7 + i];
       b7 = tmp1 + tmp2;
-      m0 = blockData[0 + i];
+      m0 = blockData[i];
       x4 = ((b6 * 473 - b4 * 196 + 128) >> 8) - b7;
       x0 = x4 - (((tmp1 - tmp2) * 362 + 128) >> 8);
       x1 = m0 - b1;
@@ -1790,7 +1348,7 @@
       y5 = x1 - x2;
       y6 = x3 - b3;
       y7 = -x0 - ((b4 * 473 + b6 * 196 + 128) >> 8);
-      blockData[0 + i] = (b7 + y4 + 128) >> 8;
+      blockData[i] = (b7 + y4 + 128) >> 8;
       blockData[1 + i] = (x4 + y3 + 128) >> 8;
       blockData[2 + i] = (y5 - x0 + 128) >> 8;
       blockData[3 + i] = (y6 - y7 + 128) >> 8;
@@ -1860,7 +1418,7 @@
     //  macroblock_escape decodes as 35.
 
     MACROBLOCK_ADDRESS_INCREMENT = new Int16Array([
-      1 * 3, 2 * 3, 0, //   0
+      3, 2 * 3, 0, //   0
       3 * 3, 4 * 3, 0, //   1  0
       0, 0, 1, //   2  1.
       5 * 3, 6 * 3, 0, //   3  00
@@ -1946,14 +1504,14 @@
     //
 
     MACROBLOCK_TYPE_I = new Int8Array([
-      1 * 3, 2 * 3, 0, //   0
+      3, 2 * 3, 0, //   0
       -1, 3 * 3, 0, //   1  0
       0, 0, 0x01, //   2  1.
       0, 0, 0x11  //   3  01.
     ]),
 
     MACROBLOCK_TYPE_P = new Int8Array([
-      1 * 3, 2 * 3, 0, //  0
+      3, 2 * 3, 0, //  0
       3 * 3, 4 * 3, 0, //  1  0
       0, 0, 0x0a, //  2  1.
       5 * 3, 6 * 3, 0, //  3  00
@@ -1970,7 +1528,7 @@
     ]),
 
     MACROBLOCK_TYPE_B = new Int8Array([
-      1 * 3, 2 * 3, 0,  //  0
+      3, 2 * 3, 0,  //  0
       3 * 3, 5 * 3, 0,  //  1  0
       4 * 3, 6 * 3, 0,  //  2  1
       8 * 3, 7 * 3, 0,  //  3  00
@@ -1995,7 +1553,7 @@
     ]),
 
     CODE_BLOCK_PATTERN = new Int16Array([
-      2 * 3, 1 * 3, 0,  //   0
+      2 * 3, 3, 0,  //   0
       3 * 3, 6 * 3, 0,  //   1  1
       4 * 3, 5 * 3, 0,  //   2  0
       8 * 3, 11 * 3, 0,  //   3  10
@@ -2124,7 +1682,7 @@
     ]),
 
     MOTION = new Int16Array([
-      1 * 3, 2 * 3, 0,  //   0
+      3, 2 * 3, 0,  //   0
       4 * 3, 3 * 3, 0,  //   1  0
       0, 0, 0,  //   2  1.
       6 * 3, 5 * 3, 0,  //   3  01
@@ -2194,7 +1752,7 @@
     ]),
 
     DCT_DC_SIZE_LUMINANCE = new Int8Array([
-      2 * 3, 1 * 3, 0,  //   0
+      2 * 3, 3, 0,  //   0
       6 * 3, 5 * 3, 0,  //   1  1
       3 * 3, 4 * 3, 0,  //   2  0
       0, 0, 1,  //   3  00.
@@ -2215,7 +1773,7 @@
     ]),
 
     DCT_DC_SIZE_CHROMINANCE = new Int8Array([
-      2 * 3, 1 * 3, 0,  //   0
+      2 * 3, 3, 0,  //   0
       4 * 3, 3 * 3, 0,  //   1  1
       6 * 3, 5 * 3, 0,  //   2  0
       8 * 3, 7 * 3, 0,  //   3  11
@@ -2249,7 +1807,7 @@
     //  escape decodes as 0xffff.
 
     DCT_COEFF = new Int32Array([
-      1 * 3, 2 * 3, 0,  //   0
+      3, 2 * 3, 0,  //   0
       4 * 3, 3 * 3, 0,  //   1  0
       0, 0, 0x0001,  //   2  1.
       7 * 3, 8 * 3, 0,  //   3  01
@@ -2537,39 +2095,6 @@
     MACROBLOCK_TYPE_P,
     MACROBLOCK_TYPE_B
   ];
-
-
-  // ----------------------------------------------------------------------------
-  // Built-in WebSocket support
-  // It should handle disconnection and any reconnection method + listening again
-
-  var WebSocketSupport = function (webSocketInstance, jsmpeg) {
-    this.jsmpeg = jsmpeg;
-    if (!webSocketInstance instanceof WebSocket) {
-      throw new Error('No WebSocket instance');
-    }
-    this.client = webSocketInstance;
-  };
-
-  WebSocketSupport.prototype.connectWebSocket = function () {
-    this.client.onopen = this.initSocketClient.bind(this);
-  };
-
-  WebSocketSupport.prototype.initSocketClient = function () {
-
-    var jsmpeg = this.jsmpeg;
-    jsmpeg.buffer = new BitReader(new ArrayBuffer(jsmpeg.socketBufferSize));
-
-    jsmpeg.nextPictureBuffer = new BitReader(new ArrayBuffer(jsmpeg.socketBufferSize));
-    jsmpeg.nextPictureBuffer.writePos = 0;
-    jsmpeg.nextPictureBuffer.chunkBegin = 0;
-    jsmpeg.nextPictureBuffer.lastWriteBeforeWrap = 0;
-
-    this.client.binaryType = 'arraybuffer';
-    this.client.onmessage = function (event) {
-      jsmpeg.receiveData.bind(jsmpeg, event.data)();
-    }
-  };
 
 
   // ----------------------------------------------------------------------------
