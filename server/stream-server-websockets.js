@@ -21,14 +21,13 @@ function sendMagicBytes(socket) {
   streamHeader.write(STREAM_MAGIC_BYTES);
   streamHeader.writeUInt16BE(width, 4);
   streamHeader.writeUInt16BE(height, 6);
-  socket.broadcast.to('/1234').emit('my message', msg);
   socket.send(streamHeader, {binary: true});
 }
 
 // Websocket Server
 var socketServer = new (require('ws').Server)({port: WEBSOCKET_PORT});
 socketServer.on('connection', function (socket) {
-
+  sendMagicBytes(socket);
   console.log('New WebSocket Connection (' + socketServer.clients.length + ' total)');
 
   socket.on('close', function (code, message) {

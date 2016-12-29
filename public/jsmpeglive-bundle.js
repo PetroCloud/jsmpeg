@@ -132,7 +132,6 @@ jsmpeglive.prototype.waitForIntraFrame = true;
 
 jsmpeglive.prototype.socketBufferSize = 512 * 1024; // 512kb each
 
-
 jsmpeglive.prototype.decodeHeader = function (data) {
   // Custom header sent to all newly connected clients when streaming
   // over websockets:
