@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=320, initial-scale=1"/>
+  <title>jsmpeglive streaming</title>
+  <style type="text/css">
+    body {
+      background: #333;
+      text-align: center;
+      margin-top: 10%;
+    }
+
+    #videoCanvas {
+      /* Always stretch the canvas to 640x480, regardless of its
+      internal size. */
+      width: 640px;
+      height: 480px;
+    }
+  </style>
+</head>
+<body>
+<!-- The Canvas size specified here is the "initial" internal resolution. jsmpeg will
+    change this internal resolution to whatever the source provides. The size the
+    canvas is displayed on the website is dictated by the CSS style.
+-->
+<canvas id="videoCanvas" width="640" height="480">
+  <p>
+    Please use a browser that supports the Canvas Element, like
+    <a href="http://www.google.com/chrome">Chrome</a>,
+    <a href="http://www.mozilla.com/firefox/">Firefox</a>,
+    <a href="http://www.apple.com/safari/">Safari</a> or Internet Explorer
+    10
+  </p>
+</canvas>
+<button onclick="play();return false;">Play</button>
+<button onclick="stop();return false;">Stop</button>
+<script type="text/javascript" src="/socket.io/socket.io.js"></script>
+<script type="text/javascript" src="jsmpeglive-bundle.js"></script>
+<script type="text/javascript">
+  function renderVideo(data) {
+    if (player) {
+      player.render(data);
+    }
+  }
+
+
+  var canvas = document.getElementById('videoCanvas');
+  var player = new jsmpeglive({canvas: canvas});
+  var socketLiveNS = io('/live');
+
+  socketLiveNS.on('connect', function () {
+    console.debug('connected');
+    socketLiveNS.emit('join', '1234');
+    socketLiveNS.on('video-data', function (data) {
+      console.debug('video-data');
+      renderVideo(data)
+    });
+    socketLiveNS.on('disconnect', function () {
+      console.debug('disconnected');
+      player.sequenceStarted = false;
+    });
+  })
+
+
+  function play() {
+    console.debug('play');
+    socketLiveNS.emit('join', '1234');
+  }
+  function stop() {
+    console.debug('stop');
+    socketLiveNS.emit('leave', '1234');
+    player.sequenceStarted = false;
+  }
+</script>
+</body>
+</html>
