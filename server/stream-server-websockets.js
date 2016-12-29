@@ -1,7 +1,7 @@
 if (process.argv.length < 2) {
   console.log(
     'Usage: \n' +
-    'node stream-server.js [<stream-port> <websocket-port>]'
+    'node stream-server-websockets.js [<stream-port> <websocket-port>]'
   );
   process.exit();
 }
@@ -14,9 +14,7 @@ var
 var width = 320,
   height = 240;
 
-// Websocket Server
-var socketServer = new (require('ws').Server)({port: WEBSOCKET_PORT});
-socketServer.on('connection', function (socket) {
+function sendMagicBytes(socket) {
   // Send magic bytes and video size to the newly connected socket
   // struct { char magic[4]; unsigned short width, height;}
   var streamHeader = new Buffer(8);
@@ -24,11 +22,21 @@ socketServer.on('connection', function (socket) {
   streamHeader.writeUInt16BE(width, 4);
   streamHeader.writeUInt16BE(height, 6);
   socket.send(streamHeader, {binary: true});
+}
 
+// Websocket Server
+var socketServer = new (require('ws').Server)({port: WEBSOCKET_PORT});
+socketServer.on('connection', function (socket) {
+  sendMagicBytes(socket);
   console.log('New WebSocket Connection (' + socketServer.clients.length + ' total)');
 
   socket.on('close', function (code, message) {
+
     console.log('Disconnected WebSocket (' + socketServer.clients.length + ' total)');
+  });
+
+  socket.on('message', function (data) {
+    console.log(data);
   });
 });
 

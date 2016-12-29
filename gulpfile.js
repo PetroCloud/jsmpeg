@@ -3,11 +3,23 @@ var concat = require('gulp-concat');
 var rename = require('gulp-rename');
 var uglify = require('gulp-uglify');
 var eslint = require('gulp-eslint');
+var bower = require('gulp-bower');
 var pump = require('pump');
+var del = require('del');
+var path = require('path');
 
 //script paths
-var jsFiles = ['WebSocketClient.js', 'jsmpeglive.js'],
-  jsDest = 'dist';
+var jsFilesWebSocketClient = [
+    'bower_components/eventemitter3/index.js',
+
+    'src/WebSocketClient.js',
+  ],
+  jsFilesJsmpeglive = [
+    'src/BitReader.js',
+    'src/jsmpeglive.js'
+  ],
+  jsDestDist = 'dist',
+  jsDestPublic = 'public';
 
 var uglifyOpts = {
   mangle: true,
@@ -34,21 +46,43 @@ var uglifyOpts = {
   }
 };
 
-gulp.task('build', function (cb) {
+gulp.task('clean-dest', function () {
+  del([jsDestDist, path.join(jsDestPublic, '*.js')]);
+});
+
+gulp.task('build-WebSocketClient', function (cb) {
   pump([
-      gulp.src(jsFiles),
+      bower(),
+      gulp.src(jsFilesWebSocketClient),
+      eslint(),
+      eslint.format(),
+      eslint.failAfterError(),
+      concat('WebSocketClient.js'),
+      gulp.dest(jsDestDist),
+      gulp.dest(jsDestPublic),
+      concat('WebSocketClient-min.js'),
+      uglify(uglifyOpts),
+      gulp.dest(jsDestDist)
+    ],
+    cb);
+});
+
+gulp.task('build-jsmpeglive', function (cb) {
+  pump([
+      gulp.src(jsFilesJsmpeglive),
       eslint(),
       eslint.format(),
       eslint.failAfterError(),
       concat('jsmpeglive-bundle.js'),
-      gulp.dest(jsDest),
+      gulp.dest(jsDestDist),
+      gulp.dest(jsDestPublic),
       rename('jsmpeglive-bundle-min.js'),
       uglify(uglifyOpts),
-      gulp.dest(jsDest)
+      gulp.dest(jsDestDist)
     ],
     cb);
 });
 
 
-gulp.task('default', ['build'], function () {
+gulp.task('default', ['clean-dest', 'build-WebSocketClient', 'build-jsmpeglive'], function () {
 });

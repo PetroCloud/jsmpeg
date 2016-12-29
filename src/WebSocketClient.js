@@ -1,3 +1,4 @@
+/* global EventEmitter */
 // ----------------------------------------------------------------------------
 // Built-in WebSocket instance
 // It should handle disconnection and any reconnection method + listening again
@@ -6,18 +7,18 @@
 
 /**
  * WebSocketClient
- * @param jsmpeglive A jsmpeglive instance
  * @constructor
  */
-var WebSocketClient = function WebSocketClient(jsmpeglive) {
-  if (!jsmpeglive) {
-    throw new Error('jsmpeglive has not been passed in to the constructor');
-  }
+
+var WebSocketClient = function WebSocketClient() {
+  EventEmitter.call(this);
   this.number = 0; // Message number
   this.attempts = 1; // reconnection attempts
-  this.jsmpeglive = jsmpeglive;
   this.instance = null;
 };
+
+WebSocketClient.prototype = Object.create(EventEmitter.prototype);
+WebSocketClient.prototype.constructor = WebSocketClient;
 
 WebSocketClient.prototype.close = function () {
   if (this.instance && this.instance.close) {
@@ -40,8 +41,8 @@ WebSocketClient.prototype.connect = function (url) {
     self.attempts = 1;
     self.instance.binaryType = 'arraybuffer';
     self.instance.onmessage = function (event) {
-      console.debug('onmessage');
-      self.jsmpeglive.receiveData.bind(self.jsmpeglive, event.data)();
+      console.debug('onmessage',self);
+      self.emit('data', event.data);
       self.number++;
       self.onmessage(event);
     };
